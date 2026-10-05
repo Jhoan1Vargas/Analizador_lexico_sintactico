@@ -1,0 +1,19 @@
+{
+    "files.associations": {
+        "*.l": "lex",
+        "parser.h": "c",
+        "gtk.h": "c"
+    },
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/**",
+        "/usr/include/gtk-3.0/**"
+    ],
+    "C_Cpp.default.compilerPath": "/usr/bin/gcc",
+    "editor.formatOnSave": false,
+    "files.encoding": "utf8",
+    "terminal.integrated.defaultProfile.windows": "MSYS2",
+    "[c]": {
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true
+    }
+}

@@ -1,0 +1,495 @@
+/* ==========================================================================
+ * parser.c  —  Implementacion del Analizador Sintactico
+ *
+ * Parser Recursivo Descendente (Recursive Descent Parser)
+ * Siguiendo los principios del Capitulo 4 de Aho, Sethi, Ullman
+ * ========================================================================== */
+
+#include "parser.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* --------------------------------------------------------------------------
+ *  Estado interno del parser
+ * -------------------------------------------------------------------------- */
+static Token* tokens_globales = NULL;
+static int num_tokens_globales = 0;
+static int token_actual = 0;
+static char buffer_error[512];
+static int contador_errores = 0;
+
+/* --------------------------------------------------------------------------
+ *  Funciones auxiliares del parser
+ * -------------------------------------------------------------------------- */
+
+/**
+ * crear_nodo()
+ * Crea un nuevo nodo del AST e inicializa sus campos.
+ */
+static NodoAST* crear_nodo(TipoNodoAST tipo, const char* valor) {
+    NodoAST* nodo = (NodoAST*)malloc(sizeof(NodoAST));
+    if (!nodo) return NULL;
+    
+    nodo->tipo = tipo;
+    nodo->valor = valor ? strdup(valor) : NULL;
+    nodo->hijo1 = NULL;
+    nodo->hijo2 = NULL;
+    nodo->hijo3 = NULL;
+    nodo->siguiente = NULL;
+    nodo->linea = token_actual;
+    
+    return nodo;
+}
+
+/**
+ * token_actual_tipo()
+ * Devuelve el tipo del token actual (o NULL si ya no hay mas tokens).
+ */
+static const char* token_actual_tipo() {
+    if (token_actual >= num_tokens_globales)
+        return NULL;
+    return tokens_globales[token_actual].tipo;
+}
+
+/**
+ * token_actual_lexema()
+ * Devuelve el lexema del token actual.
+ */
+static const char* token_actual_lexema() {
+    if (token_actual >= num_tokens_globales)
+        return NULL;
+    return tokens_globales[token_actual].lexema;
+}
+
+/**
+ * avanzar()
+ * Avanza al siguiente token.
+ */
+static void avanzar() {
+    if (token_actual < num_tokens_globales)
+        token_actual++;
+}
+
+/**
+ * coincidir()
+ * Verifica si el token actual es del tipo esperado. Si coincide, avanza.
+ * Si no, registra un error.
+ */
+static bool coincidir(const char* tipo_esperado) {
+    const char* tipo = token_actual_tipo();
+    
+    if (tipo == NULL) {
+        snprintf(buffer_error, sizeof(buffer_error),
+                 "Error: Se esperaba '%s' pero se llego al final del codigo",
+                 tipo_esperado);
+        contador_errores++;
+        return false;
+    }
+    
+    if (strcmp(tipo, tipo_esperado) == 0) {
+        avanzar();
+        return true;
+    }
+    
+    snprintf(buffer_error, sizeof(buffer_error),
+             "Error: Se esperaba '%s' pero se encontro '%s' (%s) en token %d",
+             tipo_esperado, tipo, token_actual_lexema(), token_actual + 1);
+    contador_errores++;
+    return false;
+}
+
+/**
+ * es_tipo()
+ * Verifica si el token actual es del tipo dado (sin avanzar).
+ */
+static bool es_tipo(const char* tipo) {
+    const char* actual = token_actual_tipo();
+    return (actual != NULL && strcmp(actual, tipo) == 0);
+}
+
+/* --------------------------------------------------------------------------
+ *  Funciones del parser (una por cada regla de la gramatica)
+ * -------------------------------------------------------------------------- */
+
+/* Declaraciones forward */
+static NodoAST* parsear_sentencia();
+static NodoAST* parsear_expresion();
+
+/**
+ * parsear_factor()
+ * Factor → identificador | numero | ( Expresion )
+ */
+static NodoAST* parsear_factor() {
+    if (es_tipo("IDENTIFICADOR")) {
+        const char* lexema = token_actual_lexema();
+        avanzar();
+        return crear_nodo(AST_IDENTIFICADOR, lexema);
+    }
+    else if (es_tipo("NUMERO_ENTERO")) {
+        const char* lexema = token_actual_lexema();
+        avanzar();
+        return crear_nodo(AST_NUMERO, lexema);
+    }
+    else if (es_tipo("PAREN_IZQ")) {
+        avanzar();
+        NodoAST* expr = parsear_expresion();
+        if (!coincidir("PAREN_DER")) {
+            liberar_ast(expr);
+            return crear_nodo(AST_ERROR, "Falta parentesis derecho");
+        }
+        return expr;
+    }
+    else {
+        snprintf(buffer_error, sizeof(buffer_error),
+                 "Error: Se esperaba identificador, numero o '(' en token %d",
+                 token_actual + 1);
+        contador_errores++;
+        return crear_nodo(AST_ERROR, buffer_error);
+    }
+}
+
+/**
+ * parsear_termino_prima()
+ * TerminoPrima → * Factor TerminoPrima | / Factor TerminoPrima | ε
+ */
+static NodoAST* parsear_termino_prima(NodoAST* izq) {
+    if (es_tipo("OP_MULT") || es_tipo("OP_DIV")) {
+        const char* operador = token_actual_lexema();
+        avanzar();
+        
+        NodoAST* der = parsear_factor();
+        
+        NodoAST* nodo_op = crear_nodo(AST_EXPR_BINARIA, operador);
+        nodo_op->hijo1 = izq;
+        nodo_op->hijo2 = der;
+        
+        return parsear_termino_prima(nodo_op);
+    }
+    
+    return izq; /* ε (epsilon - vacio) */
+}
+
+/**
+ * parsear_termino()
+ * Termino → Factor TerminoPrima
+ */
+static NodoAST* parsear_termino() {
+    NodoAST* factor = parsear_factor();
+    return parsear_termino_prima(factor);
+}
+
+/**
+ * parsear_expresion_prima()
+ * ExpresionPrima → == Termino | + Termino ExpresionPrima | - Termino ExpresionPrima | ε
+ */
+static NodoAST* parsear_expresion_prima(NodoAST* izq) {
+    if (es_tipo("OP_IGUALDAD")) {
+        const char* operador = token_actual_lexema();
+        avanzar();
+        
+        NodoAST* der = parsear_termino();
+        
+        NodoAST* nodo_op = crear_nodo(AST_EXPR_BINARIA, operador);
+        nodo_op->hijo1 = izq;
+        nodo_op->hijo2 = der;
+        
+        return nodo_op; /* == no es asociativo por izquierda en este contexto */
+    }
+    else if (es_tipo("OP_SUMA") || es_tipo("OP_RESTA")) {
+        const char* operador = token_actual_lexema();
+        avanzar();
+        
+        NodoAST* der = parsear_termino();
+        
+        NodoAST* nodo_op = crear_nodo(AST_EXPR_BINARIA, operador);
+        nodo_op->hijo1 = izq;
+        nodo_op->hijo2 = der;
+        
+        return parsear_expresion_prima(nodo_op);
+    }
+    
+    return izq; /* ε (epsilon - vacio) */
+}
+
+/**
+ * parsear_expresion()
+ * Expresion → Termino ExpresionPrima
+ */
+static NodoAST* parsear_expresion() {
+    NodoAST* termino = parsear_termino();
+    return parsear_expresion_prima(termino);
+}
+
+/**
+ * parsear_asignacion()
+ * Asignacion → identificador = Expresion ;
+ */
+static NodoAST* parsear_asignacion() {
+    const char* id = token_actual_lexema();
+    if (!coincidir("IDENTIFICADOR")) {
+        return crear_nodo(AST_ERROR, "Se esperaba identificador en asignacion");
+    }
+    
+    if (!coincidir("OP_ASIGNACION")) {
+        return crear_nodo(AST_ERROR, "Se esperaba '=' en asignacion");
+    }
+    
+    NodoAST* expr = parsear_expresion();
+    
+    if (!coincidir("PUNTO_Y_COMA")) {
+        liberar_ast(expr);
+        return crear_nodo(AST_ERROR, "Se esperaba ';' al final de asignacion");
+    }
+    
+    NodoAST* nodo = crear_nodo(AST_ASIGNACION, id);
+    nodo->hijo1 = expr;
+    
+    return nodo;
+}
+
+/**
+ * parsear_bloque()
+ * Bloque → { ListaSentencias }
+ */
+static NodoAST* parsear_bloque();
+
+/**
+ * parsear_sentencia_if()
+ * SentenciaIf → if ( Expresion ) Sentencia [else Sentencia]
+ */
+static NodoAST* parsear_sentencia_if() {
+    if (!coincidir("PALABRA_RESERVADA")) { /* "if" */
+        return crear_nodo(AST_ERROR, "Se esperaba 'if'");
+    }
+    
+    if (!coincidir("PAREN_IZQ")) {
+        return crear_nodo(AST_ERROR, "Se esperaba '(' despues de 'if'");
+    }
+    
+    NodoAST* condicion = parsear_expresion();
+    
+    if (!coincidir("PAREN_DER")) {
+        liberar_ast(condicion);
+        return crear_nodo(AST_ERROR, "Se esperaba ')' despues de la condicion");
+    }
+    
+    NodoAST* sentencia_then = parsear_sentencia();
+    
+    NodoAST* nodo = crear_nodo(AST_SENTENCIA_IF, "if");
+    nodo->hijo1 = condicion;
+    nodo->hijo2 = sentencia_then;
+    nodo->hijo3 = NULL;
+    
+    /* Verificar si hay 'else' opcional */
+    if (es_tipo("PALABRA_RESERVADA") &&
+        strcmp(token_actual_lexema(), "else") == 0) {
+        avanzar();
+        nodo->hijo3 = parsear_sentencia();
+    }
+    
+    return nodo;
+}
+
+/**
+ * parsear_lista_sentencias()
+ * ListaSentencias → Sentencia ListaSentencias | ε
+ */
+static NodoAST* parsear_lista_sentencias() {
+    /* Casos de terminacion: } o fin de tokens */
+    if (token_actual >= num_tokens_globales || es_tipo("LLAVE_DER")) {
+        return NULL; /* ε */
+    }
+    
+    NodoAST* sentencia = parsear_sentencia();
+    if (!sentencia) return NULL;
+    
+    /* Crear nodo de lista */
+    NodoAST* nodo = crear_nodo(AST_LISTA_SENTENCIAS, NULL);
+    nodo->hijo1 = sentencia;
+    nodo->siguiente = parsear_lista_sentencias();
+    
+    return nodo;
+}
+
+/**
+ * parsear_bloque()
+ * Bloque → { ListaSentencias }
+ */
+static NodoAST* parsear_bloque() {
+    if (!coincidir("LLAVE_IZQ")) {
+        return crear_nodo(AST_ERROR, "Se esperaba '{'");
+    }
+    
+    NodoAST* lista = parsear_lista_sentencias();
+    
+    if (!coincidir("LLAVE_DER")) {
+        liberar_ast(lista);
+        return crear_nodo(AST_ERROR, "Se esperaba '}'");
+    }
+    
+    NodoAST* nodo = crear_nodo(AST_BLOQUE, NULL);
+    nodo->hijo1 = lista;
+    
+    return nodo;
+}
+
+/**
+ * parsear_sentencia()
+ * Sentencia → SentenciaIf | Asignacion | Bloque
+ */
+static NodoAST* parsear_sentencia() {
+    if (es_tipo("PALABRA_RESERVADA") &&
+        strcmp(token_actual_lexema(), "if") == 0) {
+        return parsear_sentencia_if();
+    }
+    else if (es_tipo("LLAVE_IZQ")) {
+        return parsear_bloque();
+    }
+    else if (es_tipo("IDENTIFICADOR")) {
+        return parsear_asignacion();
+    }
+    else {
+        snprintf(buffer_error, sizeof(buffer_error),
+                 "Error: Sentencia inesperada en token %d (%s)",
+                 token_actual + 1,
+                 token_actual_lexema() ? token_actual_lexema() : "EOF");
+        contador_errores++;
+        avanzar(); /* Recuperacion de errores: saltar token */
+        return crear_nodo(AST_ERROR, buffer_error);
+    }
+}
+
+/**
+ * parsear_programa()
+ * Programa → ListaSentencias
+ */
+static NodoAST* parsear_programa() {
+    NodoAST* raiz = crear_nodo(AST_PROGRAMA, "Programa");
+    raiz->hijo1 = parsear_lista_sentencias();
+    
+    /* Verificar si quedan tokens sin consumir */
+    if (token_actual < num_tokens_globales) {
+        snprintf(buffer_error, sizeof(buffer_error),
+                 "Advertencia: Quedan tokens sin consumir desde token %d",
+                 token_actual + 1);
+        contador_errores++;
+    }
+    
+    return raiz;
+}
+
+/* --------------------------------------------------------------------------
+ *  Funcion publica principal
+ * -------------------------------------------------------------------------- */
+
+ResultadoParser analizar_sintaxis(Token* tokens, int num_tokens) {
+    ResultadoParser resultado;
+    
+    /* Inicializar estado global */
+    tokens_globales = tokens;
+    num_tokens_globales = num_tokens;
+    token_actual = 0;
+    contador_errores = 0;
+    buffer_error[0] = '\0';
+    
+    /* Parsear el programa */
+    resultado.raiz = parsear_programa();
+    resultado.num_errores = contador_errores;
+    resultado.exito = (contador_errores == 0);
+    resultado.mensaje_error = (contador_errores > 0) ? strdup(buffer_error) : NULL;
+    
+    return resultado;
+}
+
+/* --------------------------------------------------------------------------
+ *  Funcion para liberar memoria del AST
+ * -------------------------------------------------------------------------- */
+
+void liberar_ast(NodoAST* nodo) {
+    if (!nodo) return;
+    
+    liberar_ast(nodo->hijo1);
+    liberar_ast(nodo->hijo2);
+    liberar_ast(nodo->hijo3);
+    liberar_ast(nodo->siguiente);
+    
+    if (nodo->valor)
+        free(nodo->valor);
+    
+    free(nodo);
+}
+
+/* --------------------------------------------------------------------------
+ *  Funcion para obtener nombre del tipo de nodo
+ * -------------------------------------------------------------------------- */
+
+const char* obtener_tipo_nodo_str(TipoNodoAST tipo) {
+    switch (tipo) {
+        case AST_PROGRAMA:           return "Programa";
+        case AST_SENTENCIA_IF:       return "If";
+        case AST_ASIGNACION:         return "Asignacion";
+        case AST_BLOQUE:             return "Bloque";
+        case AST_EXPR_BINARIA:       return "ExprBinaria";
+        case AST_IDENTIFICADOR:      return "Identificador";
+        case AST_NUMERO:             return "Numero";
+        case AST_LISTA_SENTENCIAS:   return "ListaSentencias";
+        case AST_ERROR:              return "ERROR";
+        default:                     return "Desconocido";
+    }
+}
+
+/* --------------------------------------------------------------------------
+ *  Funcion para imprimir el AST (depuracion)
+ * -------------------------------------------------------------------------- */
+
+void imprimir_ast(NodoAST* nodo, int profundidad) {
+    if (!nodo) return;
+    
+    for (int i = 0; i < profundidad; i++)
+        printf("  ");
+    
+    printf("<%s", obtener_tipo_nodo_str(nodo->tipo));
+    if (nodo->valor)
+        printf(": %s", nodo->valor);
+    printf(">\n");
+    
+    imprimir_ast(nodo->hijo1, profundidad + 1);
+    imprimir_ast(nodo->hijo2, profundidad + 1);
+    imprimir_ast(nodo->hijo3, profundidad + 1);
+    imprimir_ast(nodo->siguiente, profundidad);
+}
+
+/* --------------------------------------------------------------------------
+ *  Funcion para generar representacion de arbol para la GUI
+ * -------------------------------------------------------------------------- */
+
+void generar_representacion_arbol(NodoAST* nodo, int profundidad,
+                                   LineaArbolCallback callback, void* user_data) {
+    if (!nodo) return;
+    
+    char linea[256];
+    char indent[128] = "";
+    
+    /* Crear indentacion visual */
+    for (int i = 0; i < profundidad; i++) {
+        strcat(indent, "  ");
+    }
+    
+    /* Formatear la linea */
+    if (nodo->valor) {
+        snprintf(linea, sizeof(linea), "%s├─ %s: %s",
+                 indent, obtener_tipo_nodo_str(nodo->tipo), nodo->valor);
+    } else {
+        snprintf(linea, sizeof(linea), "%s├─ %s",
+                 indent, obtener_tipo_nodo_str(nodo->tipo));
+    }
+    
+    callback(linea, user_data);
+    
+    /* Recorrer hijos */
+    generar_representacion_arbol(nodo->hijo1, profundidad + 1, callback, user_data);
+    generar_representacion_arbol(nodo->hijo2, profundidad + 1, callback, user_data);
+    generar_representacion_arbol(nodo->hijo3, profundidad + 1, callback, user_data);
+    generar_representacion_arbol(nodo->siguiente, profundidad, callback, user_data);
+}
